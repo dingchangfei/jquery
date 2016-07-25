@@ -2,7 +2,8 @@ module.exports = function( grunt ) {
 	"use strict";
 
 	function readOptionalJSON( filepath ) {
-		var data = {};
+		var stripJSONComments = require( "strip-json-comments" ),
+			data = {};
 		try {
 			data = JSON.parse( stripJSONComments(
 				fs.readFileSync( filepath, { encoding: "utf8" } )
@@ -12,24 +13,15 @@ module.exports = function( grunt ) {
 	}
 
 	var fs = require( "fs" ),
-		stripJSONComments = require( "strip-json-comments" ),
 		gzip = require( "gzip-js" ),
-		srcHintOptions = readOptionalJSON( "src/.jshintrc" ),
-		newNode = !/^v0/.test( process.version ),
+		oldNode = /^v0\./.test( process.version );
 
-		// Allow to skip jsdom-related tests in Node.js < 1.0.0
-		runJsdomTests = newNode || ( function() {
-			try {
-				require( "jsdom" );
-				return true;
-			} catch ( e ) {
-				return false;
-			}
-		} )();
-
-	// The concatenated file won't pass onevar
-	// But our modules can
-	delete srcHintOptions.onevar;
+	// Support: Node.js <4
+	// Skip running tasks that dropped support for Node.js 0.10 & 0.12
+	// in those Node versions.
+	function runIfNewNode( task ) {
+		return oldNode ? "print_old_node_message:" + task : task;
+	}
 
 	if ( !grunt.option( "filename" ) ) {
 		grunt.option( "filename", "jquery.js" );
@@ -75,6 +67,10 @@ module.exports = function( grunt ) {
 					callbacks: [ "deferred" ],
 					css: [ "effects", "dimensions", "offset" ],
 					"css/showHide": [ "effects" ],
+					deferred: {
+						remove: [ "ajax", "effects", "queue", "core/ready" ],
+						include: [ "core/ready-no-deferred" ]
+					},
 					sizzle: [ "css/hiddenVisibleSelectors", "effects/animatedSelector" ]
 				}
 			}
@@ -101,7 +97,7 @@ module.exports = function( grunt ) {
 
 					"requirejs/require.js": "requirejs/require.js",
 
-					"sinon/fake_timers.js": "sinon/lib/sinon/util/fake_timers.js",
+					"sinon/sinon.js": "sinon/pkg/sinon.js",
 					"sinon/LICENSE.txt": "sinon/LICENSE"
 				}
 			}
@@ -111,33 +107,15 @@ module.exports = function( grunt ) {
 				src: [ "package.json" ]
 			}
 		},
-		jshint: {
-			all: {
-				src: [
-					"src/**/*.js", "Gruntfile.js", "test/**/*.js", "build/**/*.js"
-				],
-				options: {
-					jshintrc: true
-				}
-			},
-			dist: {
-				src: "dist/jquery.js",
-				options: srcHintOptions
-			}
-		},
-		jscs: {
-			src: "src",
-			gruntfile: "Gruntfile.js",
+		eslint: {
+			options: {
 
-			// Check parts of tests that pass
-			test: [
-				"test/data/testrunner.js",
-				"test/unit/animation.js",
-				"test/unit/basic.js",
-				"test/unit/tween.js",
-				"test/unit/wrap.js"
-			],
-			build: "build"
+				// See https://github.com/sindresorhus/grunt-eslint/issues/119
+				quiet: true
+			},
+			all: ".",
+			dist: "dist/jquery.js",
+			dev: [ "src/**/*.js", "Gruntfile.js", "test/**/*.js", "build/**/*.js" ]
 		},
 		testswarm: {
 			tests: [
@@ -171,7 +149,7 @@ module.exports = function( grunt ) {
 			]
 		},
 		watch: {
-			files: [ "<%= jshint.all.src %>" ],
+			files: [ "<%= eslint.dev %>" ],
 			tasks: [ "dev" ]
 		},
 		uglify: {
@@ -183,6 +161,7 @@ module.exports = function( grunt ) {
 				options: {
 					preserveComments: false,
 					sourceMap: true,
+					ASCIIOnly: true,
 					sourceMapName:
 						"dist/<%= grunt.option('filename').replace('.js', '.min.map') %>",
 					report: "min",
@@ -202,24 +181,50 @@ module.exports = function( grunt ) {
 	} );
 
 	// Load grunt tasks from NPM packages
-	require( "load-grunt-tasks" )( grunt );
+	// Support: Node.js <4
+	// Don't load the eslint task in old Node.js, it won't parse.
+	require( "load-grunt-tasks" )( grunt, {
+		pattern: oldNode ? [ "grunt-*", "!grunt-eslint" ] : [ "grunt-*" ]
+	} );
 
 	// Integrate jQuery specific tasks
 	grunt.loadTasks( "build/tasks" );
 
-	grunt.registerTask( "lint", [ "jsonlint", "jshint", "jscs" ] );
+	grunt.registerTask( "print_old_node_message", function() {
+		var task = [].slice.call( arguments ).join( ":" );
+		grunt.log.writeln( "Old Node.js detected, running the task \"" + task + "\" skipped..." );
+	} );
 
-	// Don't run Node-related tests in Node.js < 1.0.0 as they require an old
-	// jsdom version that needs compiling, making it harder for people to compile
-	// jQuery on Windows. (see gh-2519)
-	grunt.registerTask( "test_fast", runJsdomTests ? [ "node_smoke_tests" ] : [] );
+	grunt.registerTask( "lint", [
+		"jsonlint",
+		runIfNewNode( "eslint:all" )
+	] );
+
+	grunt.registerTask( "test_fast", [ runIfNewNode( "node_smoke_tests" ) ] );
 
 	grunt.registerTask( "test", [ "test_fast" ].concat(
-		runJsdomTests ? [ "promises_aplus_tests" ] : []
+		[ runIfNewNode( "promises_aplus_tests" ) ]
 	) );
 
 	// Short list as a high frequency watch task
-	grunt.registerTask( "dev", [ "build:*:*", "lint", "uglify", "remove_map_comment", "dist:*" ] );
+	grunt.registerTask( "dev", [
+			"build:*:*",
+			runIfNewNode( "newer:eslint:dev" ),
+			"uglify",
+			"remove_map_comment",
+			"dist:*"
+		]
+	);
 
-	grunt.registerTask( "default", [ "dev", "test_fast", "compare_size" ] );
+	grunt.registerTask( "default", [
+		"dev",
+		runIfNewNode( "eslint:dist" ),
+		"test_fast",
+		"compare_size"
+	] );
+
+	grunt.registerTask( "precommit_lint", [
+		"newer:jsonlint",
+		runIfNewNode( "newer:eslint:all" )
+	] );
 };
